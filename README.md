@@ -1,6 +1,6 @@
 # meenow
 
-A decentralized, serverless, cat-themed spontaneous photo-sharing PWA for Pixelfed.
+A decentralized, serverless, cat-themed spontaneous photo-sharing PWA for Pixelfed - hosted on meenow.de.
 
 Users receive a daily prompt at a pseudo-random local time (between 9 AM and 9 PM) to take a dual-camera photo — back camera for surroundings, front camera for a selfie — stitched into one composite image and shared with friends via the Fediverse. No custom backend or database: the Pixelfed/Mastodon API is the entire backend.
 
