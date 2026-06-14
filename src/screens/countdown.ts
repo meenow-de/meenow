@@ -53,9 +53,10 @@ export function renderCountdown(): HTMLElement {
 
 export function updateCountdownDisplay(trigger: Date): void {
   const windowStart = getWindowStart();
-  const remaining = trigger.getTime() - Date.now();
+  const now = Date.now();
+  const remaining = trigger.getTime() - now;
   const totalMs = trigger.getTime() - windowStart.getTime();
-  const elapsed = Date.now() - windowStart.getTime();
+  const elapsed = now - windowStart.getTime();
   const progress = Math.min(1, Math.max(0, elapsed / totalMs));
 
   const remainingEl = document.getElementById('countdown-remaining');

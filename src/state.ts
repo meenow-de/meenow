@@ -1,4 +1,4 @@
-import { getTodayTrigger, computeState, localDateString, type AppState } from './timer';
+import { localDateString } from './timer';
 
 const PREFIX = 'meenow:';
 export const MAX_POSTS_PER_TRIGGER = 2;
@@ -42,6 +42,3 @@ export function syncPostCount(serverCount: number): void {
   }
 }
 
-export function getCurrentState(): AppState {
-  return computeState(getTodayTrigger(), postsToday(), !hasEverPosted());
-}

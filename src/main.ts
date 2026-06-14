@@ -10,37 +10,55 @@ import { renderLogin } from './screens/login';
 import { renderInstallNudge, removeInstallNudge } from './components/installNudge';
 
 const app = document.getElementById('app')!;
-type Screen = AppState | 'login';
+type Screen = AppState | 'login' | 'capturing';
 let activeScreen: Screen | null = null;
 let tickId: number | null = null;
 
-function mount(screen: Screen): void {
+const DEV_HOSTNAMES = new Set(['dev.meenow.de', 'localhost', '127.0.0.1']);
+if (DEV_HOSTNAMES.has(window.location.hostname)) {
+  const badge = document.createElement('div');
+  badge.textContent = 'dev';
+  badge.className = 'fixed bottom-3 right-3 bg-gold text-white text-xs font-semibold px-2 py-0.5 rounded-full z-50 opacity-75 pointer-events-none select-none';
+  document.body.appendChild(badge);
+}
+
+function mountCapture(): void {
+  activeScreen = 'capturing';
+  app.innerHTML = '';
+  removeInstallNudge();
+  app.appendChild(renderCapture(() => { activeScreen = null; }));
+}
+
+function mount(screen: AppState | 'login'): void {
   app.innerHTML = '';
   if (screen === 'login') app.appendChild(renderLogin());
   else if (screen === 'before_trigger') app.appendChild(renderCountdown());
   else if (screen === 'awaiting_capture') {
     removeInstallNudge();
-    app.appendChild(renderCapture());
+    app.appendChild(renderCapture(() => { activeScreen = null; }));
     return;
   } else {
-    app.appendChild(renderFeed());
+    app.appendChild(renderFeed(mountCapture));
   }
   renderInstallNudge();
 }
 
 function tick(): void {
+  if (activeScreen === 'capturing') return;
+
+  const trigger = getTodayTrigger();
   const auth = getAuthState();
-  const screen: Screen = auth
-    ? computeState(getTodayTrigger(), postsToday(), !hasEverPosted())
+  const screen: AppState | 'login' = auth
+    ? computeState(trigger, postsToday(), !hasEverPosted())
     : 'login';
 
-  if (screen !== activeScreen) {
+  if ((screen as Screen) !== activeScreen) {
     activeScreen = screen;
     mount(screen);
   }
 
   if (screen === 'before_trigger') {
-    updateCountdownDisplay(getTodayTrigger());
+    updateCountdownDisplay(trigger);
   }
 }
 

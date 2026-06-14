@@ -1,4 +1,6 @@
 import { markPostedToday, postsToday, MAX_POSTS_PER_TRIGGER } from '../state';
+
+const CAMERA_SWITCH_DELAY_MS = 600; // browser needs time to release back camera before front opens
 import { getAuthState } from '../api/auth';
 import { postMeenow } from '../api/pixelfed';
 import { CAT_EARS_SHUTTER } from '../icons';
@@ -120,7 +122,7 @@ function cameraErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : 'Could not access camera.';
 }
 
-export function renderCapture(): HTMLElement {
+export function renderCapture(onDone?: () => void): HTMLElement {
   const root = document.createElement('div');
   root.id = 'screen-capture';
 
@@ -128,9 +130,11 @@ export function renderCapture(): HTMLElement {
   let frontBlob: Blob | null = null;
   let compositeBlob: Blob | null = null;
   let preferPortrait = true;
+  let previewUrl: string | null = null;
 
   function show(step: Step, message = ''): void {
     stopAllStreams();
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
     root.className = step === 'back' || step === 'front' || step === 'preview'
       ? 'fixed inset-0 bg-black'
       : 'screen gap-8 text-center';
@@ -209,7 +213,7 @@ export function renderCapture(): HTMLElement {
     if (!backBlob) { show('error', 'Failed to capture.'); return; }
     stopAllStreams();
     show('switching');
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, CAMERA_SWITCH_DELAY_MS));
     show('front');
     startFront();
   }
@@ -262,9 +266,9 @@ export function renderCapture(): HTMLElement {
 
     const imgWrapper = document.createElement('div');
     imgWrapper.className = 'flex-1 min-h-0 flex items-center justify-center overflow-hidden';
-    const url = URL.createObjectURL(compositeBlob!);
+    previewUrl = URL.createObjectURL(compositeBlob!);
     const img = document.createElement('img');
-    img.src = url;
+    img.src = previewUrl;
     img.className = 'max-w-full max-h-full object-contain';
     img.alt = 'Your meenow photo';
     imgWrapper.appendChild(img);
@@ -272,21 +276,23 @@ export function renderCapture(): HTMLElement {
 
     const bar = document.createElement('div');
     bar.className = 'shrink-0 bg-cream px-6 py-5 safe-area-bottom flex gap-3';
-    bar.innerHTML = `
-      <button id="btn-retake" class="flex-1 border border-ink/20 text-ink rounded-full py-3 text-sm font-medium">Retake</button>
-      <button id="btn-post" class="flex-1 btn-primary">Post</button>
-    `;
-    d.appendChild(bar);
 
-    bar.querySelector('#btn-retake')?.addEventListener('click', () => {
-      URL.revokeObjectURL(url);
+    const retakeBtn = document.createElement('button');
+    retakeBtn.className = 'flex-1 border border-ink/20 text-ink rounded-full py-3 text-sm font-medium';
+    retakeBtn.textContent = 'Retake';
+    retakeBtn.addEventListener('click', () => {
       backBlob = null; frontBlob = null; compositeBlob = null;
-      show('start');
+      show('start'); // show() revokes previewUrl
     });
-    bar.querySelector('#btn-post')?.addEventListener('click', () => {
-      URL.revokeObjectURL(url);
-      upload();
-    });
+    bar.appendChild(retakeBtn);
+
+    const postBtn = document.createElement('button');
+    postBtn.className = 'flex-1 btn-primary';
+    postBtn.textContent = 'Post';
+    postBtn.addEventListener('click', () => upload()); // show('uploading') inside upload() revokes previewUrl
+    bar.appendChild(postBtn);
+
+    d.appendChild(bar);
     return d;
   }
 
@@ -297,7 +303,7 @@ export function renderCapture(): HTMLElement {
     try {
       await postMeenow(auth, compositeBlob!, backBlob!, frontBlob!);
       markPostedToday();
-      window.location.reload();
+      onDone?.();
     } catch (err) {
       show('error', err instanceof Error ? err.message : 'Upload failed.');
     }
@@ -305,7 +311,10 @@ export function renderCapture(): HTMLElement {
 
   function makeMessage(text: string): HTMLElement {
     const d = document.createElement('div');
-    d.innerHTML = `<p class="text-ink/60 text-sm">${text}</p>`;
+    const p = document.createElement('p');
+    p.className = 'text-ink/60 text-sm';
+    p.textContent = text;
+    d.appendChild(p);
     return d;
   }
 
@@ -322,11 +331,15 @@ export function renderCapture(): HTMLElement {
   function makeError(message: string): HTMLElement {
     const d = document.createElement('div');
     d.className = 'flex flex-col items-center gap-6 max-w-xs';
-    d.innerHTML = `
-      <p class="text-sm text-ink/70 leading-relaxed">${message}</p>
-      <button id="btn-retry" class="btn-primary">Try again</button>
-    `;
-    d.querySelector('#btn-retry')?.addEventListener('click', () => show('start'));
+    const p = document.createElement('p');
+    p.className = 'text-sm text-ink/70 leading-relaxed';
+    p.textContent = message;
+    d.appendChild(p);
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary';
+    btn.textContent = 'Try again';
+    btn.addEventListener('click', () => show('start'));
+    d.appendChild(btn);
     return d;
   }
 
