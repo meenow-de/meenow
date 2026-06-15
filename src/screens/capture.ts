@@ -19,7 +19,7 @@ async function openCamera(
   facingMode: 'environment' | 'user',
 ): Promise<MediaStream> {
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: facingMode } },
+    video: { facingMode: { ideal: facingMode }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false,
   });
   activeStreams.push(stream);
