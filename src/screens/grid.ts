@@ -1,12 +1,14 @@
 // Grid screen: archive of the authenticated user's own meenow photos in a 3-column grid grouped by month.
+// Older pages lazy-load via an IntersectionObserver sentinel as the user scrolls.
 import { CHEVRON_LEFT_ICON } from '../icons';
 import type { AuthState } from '../api/auth';
-import { fetchMyAllPosts, type FeedPost } from '../api/pixelfed';
+import { fetchMyPostsPage, type FeedPost, type MyPostsPage } from '../api/pixelfed';
 
 export function renderGrid(
   auth: AuthState,
   onOpenPost: (post: FeedPost) => void,
   onBack: () => void,
+  initialScrollY = 0,
 ): HTMLElement {
   const root = document.createElement('div');
   root.id = 'screen-grid';
@@ -35,7 +37,7 @@ export function renderGrid(
   content.className = 'flex-1';
   root.appendChild(content);
 
-  loadGridContent(content, auth, onOpenPost);
+  loadGridContent(content, auth, onOpenPost, initialScrollY);
   return root;
 }
 
@@ -43,6 +45,7 @@ async function loadGridContent(
   container: HTMLElement,
   auth: AuthState,
   onOpenPost: (post: FeedPost) => void,
+  initialScrollY: number,
 ): Promise<void> {
   container.innerHTML = `
     <div class="flex items-center justify-center py-20">
@@ -50,9 +53,9 @@ async function loadGridContent(
     </div>
   `;
 
-  let posts: FeedPost[];
+  let page: MyPostsPage;
   try {
-    posts = await fetchMyAllPosts(auth);
+    page = await fetchMyPostsPage(auth);
   } catch {
     if (!container.isConnected) return;
     container.innerHTML = `
@@ -61,22 +64,86 @@ async function loadGridContent(
         <button id="btn-grid-retry" class="text-sm text-gold underline underline-offset-2">Retry</button>
       </div>
     `;
-    container.querySelector('#btn-grid-retry')?.addEventListener('click', () => loadGridContent(container, auth, onOpenPost));
+    container.querySelector('#btn-grid-retry')?.addEventListener('click', () => loadGridContent(container, auth, onOpenPost, initialScrollY));
     return;
   }
 
   if (!container.isConnected) return;
   container.innerHTML = '';
 
-  if (posts.length === 0) {
-    container.innerHTML = `
-      <div class="flex flex-col items-center py-16 gap-4 text-ink/40 text-center px-6">
-        <p class="text-sm">No meenow photos yet.</p>
-      </div>
-    `;
+  if (page.posts.length === 0 && !page.hasMore) {
+    showEmpty(container);
     return;
   }
 
+  const sections = document.createElement('div');
+  container.appendChild(sections);
+  renderMonthSections(sections, page.posts, onOpenPost);
+
+  if (initialScrollY) requestAnimationFrame(() => window.scrollTo(0, initialScrollY));
+
+  if (!page.hasMore) return;
+
+  // Sentinel + footer row: spinner while a page loads, retry on failure.
+  const footer = document.createElement('div');
+  footer.className = 'flex items-center justify-center py-6 min-h-16';
+  container.appendChild(footer);
+
+  let fetching = false;
+  const loadMore = async (): Promise<void> => {
+    if (fetching) return;
+    fetching = true;
+    footer.innerHTML = '<div class="w-6 h-6 spinner"></div>';
+    try {
+      const next = await fetchMyPostsPage(auth);
+      if (!container.isConnected) { observer.disconnect(); return; }
+      renderMonthSections(sections, next.posts, onOpenPost);
+      if (next.hasMore) {
+        footer.innerHTML = '';
+        // observe() delivers an initial record, re-evaluating a sentinel that
+        // stayed in view (short content) so paging continues without a scroll.
+        observer.unobserve(footer);
+        observer.observe(footer);
+      } else {
+        observer.disconnect();
+        footer.remove();
+        if (next.posts.length === 0) showEmpty(container);
+      }
+    } catch {
+      if (!container.isConnected) { observer.disconnect(); return; }
+      footer.innerHTML = `
+        <div class="flex flex-col items-center gap-2 text-center">
+          <p class="text-sm text-ink/50">Could not load more photos.</p>
+          <button class="text-sm text-gold underline underline-offset-2">Retry</button>
+        </div>
+      `;
+      footer.querySelector('button')?.addEventListener('click', () => loadMore());
+    } finally {
+      fetching = false;
+    }
+  };
+
+  const observer = new IntersectionObserver(entries => {
+    if (!container.isConnected) { observer.disconnect(); return; }
+    if (entries.some(e => e.isIntersecting)) void loadMore();
+  }, { rootMargin: '600px' });
+  observer.observe(footer);
+}
+
+function showEmpty(container: HTMLElement): void {
+  container.innerHTML = `
+    <div class="flex flex-col items-center py-16 gap-4 text-ink/40 text-center px-6">
+      <p class="text-sm">No meenow photos yet.</p>
+    </div>
+  `;
+}
+
+function renderMonthSections(
+  sections: HTMLElement,
+  posts: FeedPost[],
+  onOpenPost: (post: FeedPost) => void,
+): void {
+  sections.innerHTML = '';
   const byMonth = groupByMonth(posts);
   for (const [monthKey, group] of byMonth) {
     const section = document.createElement('div');
@@ -102,7 +169,7 @@ async function loadGridContent(
       grid.appendChild(cell);
     }
     section.appendChild(grid);
-    container.appendChild(section);
+    sections.appendChild(section);
   }
 }
 
