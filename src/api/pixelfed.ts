@@ -3,6 +3,7 @@ import type { AuthState } from './auth';
 import { patchAccountId } from './auth';
 import { getLastTriggerTime } from '../timer';
 import { MAX_POSTS_PER_TRIGGER } from '../state';
+import { idbGet, IDB_KEYS } from '../idb';
 
 // --- Mastodon/Pixelfed API types ---
 
@@ -218,7 +219,10 @@ function fetchHomeTimeline(auth: AuthState, force = false): Promise<MastodonStat
     ? `https://${auth.instance}/api/v1/timelines/home?limit=${HOME_TIMELINE_LIMIT}&since_id=${_homeCache.newestId}`
     : `https://${auth.instance}/api/v1/timelines/home?limit=${HOME_TIMELINE_LIMIT}`;
 
-  _homePending = fetch(url, { headers: { Authorization: `Bearer ${auth.accessToken}` } })
+  // no-store: the full-page URL is identical on every launch, so a stale HTTP
+  // cache hit would render an old snapshot missing the newest posts (the user's
+  // own post first among them, which also re-blurs the feed via the count).
+  _homePending = fetch(url, { headers: { Authorization: `Bearer ${auth.accessToken}` }, cache: 'no-store' })
     .then(r => {
       // A failed fetch must reject, not resolve empty: an empty result would be
       // cached and render as a legitimately empty feed / zero post count.
@@ -356,13 +360,22 @@ export async function fetchTodayPostCount(auth: AuthState): Promise<number> {
   const accountId = await resolveAccountId(auth);
   if (!accountId) return 0;
   const periodStart = getLastTriggerTime().getTime();
-  try {
-    const statuses = await fetchHomeTimeline(auth);
-    return statuses.filter(s =>
+  const countOwn = (statuses: MastodonStatus[]): number =>
+    statuses.filter(s =>
       s.account.id === accountId &&
       new Date(s.created_at).getTime() >= periodStart &&
       hasMeenowTag(s)
     ).length;
+  try {
+    let count = countOwn(await fetchHomeTimeline(auth));
+    if (count === 0 && await idbGet<number>(IDB_KEYS.postedTriggerMs) === periodStart) {
+      // This device posted in the current period but the timeline snapshot
+      // lacks the post — the full-page response was stale (e.g. a server-side
+      // timeline cache). One forced since_id refetch recovers it, the same way
+      // pull-to-refresh does; the merge also heals _homeCache for the feed.
+      count = countOwn(await fetchHomeTimeline(auth, true));
+    }
+    return count;
   } catch {
     return 0;
   }
