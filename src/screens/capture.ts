@@ -5,6 +5,12 @@ import { postMeenow, type PostProgress } from '../api/pixelfed';
 import { CAT_EARS_SHUTTER, SAVE_ICON, CHECK_ICON } from '../icons';
 import { saveImage, dateFilename } from '../share';
 import { insertExif } from '../exif';
+import {
+  getPhysicalAngle,
+  onPhysicalAngleChange,
+  requestOrientationPermission,
+  startOrientationTracking,
+} from '../orientation';
 
 const CAMERA_SWITCH_DELAY_MS = 600; // browser needs time to release back camera before front opens
 
@@ -69,6 +75,36 @@ function shutterPositionClasses(): string {
   return 'absolute bottom-[max(3rem,calc(env(safe-area-inset-bottom,0px)+1rem))] left-1/2 -translate-x-1/2';
 }
 
+// CCW angle screen.orientation reports for the current layout.
+function layoutAngle(): number {
+  const type = screen.orientation?.type ?? '';
+  if (type === 'landscape-primary') return 90;
+  if (type === 'portrait-secondary') return 180;
+  if (type === 'landscape-secondary') return 270;
+  return 0;
+}
+
+// How far the phone is physically rotated relative to its (possibly
+// rotation-locked) layout — 0 whenever the layout follows the device.
+function physicalVsLayoutDeg(): number {
+  return (getPhysicalAngle() - layoutAngle() + 360) % 360;
+}
+
+// Keeps an element's icon upright for the user when the layout is rotation-
+// locked, mimicking native camera apps. Self-cleans once the element leaves
+// the DOM.
+function keepUpright(target: Element | null): void {
+  if (!(target instanceof HTMLElement) && !(target instanceof SVGElement)) return;
+  const el = target;
+  el.style.transition = 'transform 0.2s';
+  const apply = () => { el.style.transform = `rotate(${physicalVsLayoutDeg()}deg)`; };
+  apply();
+  const off = onPhysicalAngleChange(() => {
+    if (!el.isConnected) { off(); return; }
+    apply();
+  });
+}
+
 // Applies the orientation-aware anchor and keeps it updated while the button
 // is mounted; the listener removes itself once the button leaves the DOM
 // (same self-cleanup pattern as the feed-header countdown).
@@ -86,30 +122,36 @@ function positionShutter(btn: HTMLElement, baseClasses: string): void {
 
 // Grab the current preview frame so the photo matches the viewfinder exactly —
 // no still-pipeline lag or AE/AWB shift (issue #76). Orientation is corrected
-// using the actual device angle at capture time.
+// using the *physical* device angle at capture time (accelerometer, falling
+// back to screen.orientation): with the OS rotation lock on the layout stays
+// portrait and the stream stays sensor-native, but a phone held sideways
+// should still produce an upright landscape photo.
 async function captureFrame(video: HTMLVideoElement): Promise<Blob> {
   const W = video.videoWidth;
   const H = video.videoHeight;
-  const angle = screen.orientation?.angle ?? 0;
-  const isPortraitDevice = (screen.orientation?.type ?? '').startsWith('portrait');
+  const layoutPortrait = (screen.orientation?.type ?? '').startsWith('portrait');
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d')!;
 
-  if (W > H && isPortraitDevice) {
-    // Landscape stream on portrait device — rotate to portrait
+  // Landscape layout: the browser already rotated stream and layout together —
+  // draw as-is (pre-existing behavior). Portrait layout: the stream is
+  // sensor-native; a landscape stream needs +90° when the phone is physically
+  // portrait, and the physical angle shifts that correction (0° when held
+  // landscape-primary, etc.). With no sensor data getPhysicalAngle mirrors
+  // screen.orientation, reproducing the old ±90° behavior exactly.
+  const base = W > H && layoutPortrait ? 90 : 0;
+  const deg = layoutPortrait ? (base - getPhysicalAngle() + 360) % 360 : 0;
+
+  if (deg === 90 || deg === 270) {
     canvas.width = H;
     canvas.height = W;
-    if (angle === 0) {
-      ctx.translate(H, 0);
-      ctx.rotate(Math.PI / 2);
-    } else {
-      ctx.translate(0, W);
-      ctx.rotate(-Math.PI / 2);
-    }
   } else {
     canvas.width = W;
     canvas.height = H;
   }
+  if (deg === 90) { ctx.translate(H, 0); ctx.rotate(Math.PI / 2); }
+  else if (deg === 180) { ctx.translate(W, H); ctx.rotate(Math.PI); }
+  else if (deg === 270) { ctx.translate(0, W); ctx.rotate(-Math.PI / 2); }
   ctx.drawImage(video, 0, 0, W, H);
 
   return new Promise((resolve, reject) =>
@@ -200,6 +242,12 @@ export function renderCapture(
   root.id = 'screen-capture';
 
   let closing = false;
+  // Track physical orientation for the whole capture flow; also self-cleans
+  // via the change subscription if the screen is unmounted externally.
+  const stopTracking = startOrientationTracking();
+  const offTrackerCleanup = onPhysicalAngleChange(() => {
+    if (!root.isConnected) { offTrackerCleanup(); stopTracking(); }
+  });
   let backBlob: Blob | null = null;
   let frontBlob: Blob | null = null;
   let compositeBlob: Blob | null = null;
@@ -270,6 +318,7 @@ export function renderCapture(
     btn.addEventListener('click', () => {
       closing = true;
       stopCaptureStreams();
+      stopTracking();
       onCancel();
     });
     return btn;
@@ -293,7 +342,12 @@ export function renderCapture(
     positionShutter(btn, 'w-20 h-20 text-ink hover:text-gold transition-colors active:scale-95');
     btn.setAttribute('aria-label', 'Start camera');
     btn.innerHTML = CAT_EARS_SHUTTER;
-    btn.addEventListener('click', () => show('back'));
+    keepUpright(btn.firstElementChild);
+    btn.addEventListener('click', () => {
+      // iOS requires a user gesture for motion-sensor permission; elsewhere no-op.
+      void requestOrientationPermission();
+      show('back');
+    });
     d.appendChild(btn);
 
     const note = document.createElement('div');
@@ -326,6 +380,7 @@ export function renderCapture(
     positionShutter(btn, 'w-20 h-20 text-white drop-shadow-lg active:scale-95');
     btn.setAttribute('aria-label', 'Capture');
     btn.innerHTML = CAT_EARS_SHUTTER;
+    keepUpright(btn.firstElementChild);
     btn.addEventListener('click', () => captureBack(video));
     d.appendChild(btn);
 
@@ -366,6 +421,7 @@ export function renderCapture(
     const countdownEl = document.createElement('div');
     countdownEl.id = 'selfie-countdown';
     countdownEl.className = 'absolute inset-0 flex items-center justify-center text-white text-9xl font-bold drop-shadow-2xl';
+    keepUpright(countdownEl);
     d.appendChild(countdownEl);
 
     return d;
@@ -530,6 +586,7 @@ export function renderCapture(
       statusText = '';
       locationText = '';
       progress = {};
+      stopTracking();
       onPosted();
       onDone();
     } catch (err) {

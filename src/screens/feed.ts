@@ -3,6 +3,8 @@ import { SLEEPING_CAT, SPEECH_BUBBLE_ICON, GRID_ICON, PEOPLE_ICON } from '../ico
 import { clearAuth, getAuthState, type AuthState } from '../api/auth';
 import { MAX_POSTS_PER_TRIGGER } from '../state';
 import { fetchMeenowFeed, type FeedPost } from '../api/pixelfed';
+import { fetchDailyBonus, type DailyBonus } from '../api/dailyBonus';
+import { fetchXkcdBonus, comicUrl, type XkcdBonus } from '../api/xkcd';
 import { fetchPendingRequestCount } from '../api/social';
 import { getLastTriggerTime, getNextTriggerTime, formatShortDateTime, formatCountdown, formatRelativeTime } from '../timer';
 
@@ -240,11 +242,148 @@ async function loadFeed(container: HTMLElement, auth: AuthState, postCount: numb
         <p class="text-sm">No meenow posts from friends yet today.</p>
       </div>
     `;
-    return;
+  } else {
+    const unblurred = postCount > 0;
+    posts.forEach(post => container.appendChild(makePostCard(post, unblurred, auth, onOpenPost, onOpenPeer)));
   }
 
-  const unblurred = postCount > 0;
-  posts.forEach(post => container.appendChild(makePostCard(post, unblurred, auth, onOpenPost, onOpenPeer)));
+  // Bonus cards (xkcd, then Wikimedia picture of the day) fill the
+  // bottom of the feed — especially valuable while the circle is quiet. Fully
+  // best-effort: on failure the placeholder just stays empty.
+  const xkcdSlot = document.createElement('div');
+  container.appendChild(xkcdSlot);
+  void fetchXkcdBonus().then(bonus => {
+    if (bonus && xkcdSlot.isConnected) xkcdSlot.replaceWith(makeXkcdCard(bonus));
+  });
+
+  const bonusSlot = document.createElement('div');
+  container.appendChild(bonusSlot);
+  void fetchDailyBonus().then(bonus => {
+    if (bonus && bonusSlot.isConnected) bonusSlot.replaceWith(makeBonusCard(bonus));
+  });
+}
+
+function makeBonusCard(bonus: DailyBonus): HTMLElement {
+  const card = document.createElement('article');
+  card.className = 'border-b border-t border-ink/8';
+
+  const header = document.createElement('div');
+  header.className = 'flex items-center gap-3 px-4 py-3';
+
+  const badge = document.createElement('div');
+  badge.className = 'w-9 h-9 rounded-full bg-gold-light shrink-0 flex items-center justify-center text-lg';
+  badge.textContent = '🌍';
+  header.appendChild(badge);
+
+  const info = document.createElement('div');
+  info.className = 'flex-1 min-w-0';
+
+  const nameEl = document.createElement('p');
+  nameEl.className = 'text-sm font-medium text-ink truncate';
+  nameEl.textContent = 'Picture of the day';
+  info.appendChild(nameEl);
+
+  const metaEl = document.createElement('p');
+  metaEl.className = 'text-xs text-ink/40 truncate';
+  metaEl.textContent = bonus.imageCredit ? `Wikimedia Commons · ${bonus.imageCredit}` : 'Wikimedia Commons';
+  info.appendChild(metaEl);
+
+  header.appendChild(info);
+  card.appendChild(header);
+
+  const link = document.createElement('a');
+  link.href = bonus.imageLink || 'https://commons.wikimedia.org/wiki/Main_Page';
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  const photo = document.createElement('img');
+  photo.src = bonus.imageUrl;
+  photo.className = 'w-full block';
+  photo.alt = bonus.imageTitle;
+  photo.loading = 'lazy';
+  link.appendChild(photo);
+  card.appendChild(link);
+
+  const meta = document.createElement('div');
+  meta.className = 'px-4 pt-2 pb-3 flex flex-col gap-1.5';
+  const captionText = bonus.description || bonus.imageTitle;
+  if (captionText) {
+    const caption = document.createElement('p');
+    caption.className = 'text-sm text-ink leading-relaxed';
+    caption.textContent = captionText;
+    meta.appendChild(caption);
+  }
+  const moreLink = document.createElement('a');
+  moreLink.href = link.href;
+  moreLink.target = '_blank';
+  moreLink.rel = 'noopener noreferrer';
+  moreLink.className = 'text-xs text-gold';
+  moreLink.textContent = 'More on Wikimedia Commons →';
+  meta.appendChild(moreLink);
+  card.appendChild(meta);
+
+  return card;
+}
+
+// All XkcdBonus fields were validated in fetchXkcdBonus (the mirror file is
+// world-writable via the relay token); text still only goes through textContent.
+function makeXkcdCard(bonus: XkcdBonus): HTMLElement {
+  const card = document.createElement('article');
+  card.className = 'border-b border-t border-ink/8';
+
+  const header = document.createElement('div');
+  header.className = 'flex items-center gap-3 px-4 py-3';
+
+  const badge = document.createElement('div');
+  badge.className = 'w-9 h-9 rounded-full bg-gold-light shrink-0 flex items-center justify-center text-lg';
+  badge.textContent = '✏️';
+  header.appendChild(badge);
+
+  const info = document.createElement('div');
+  info.className = 'flex-1 min-w-0';
+
+  const nameEl = document.createElement('p');
+  nameEl.className = 'text-sm font-medium text-ink truncate';
+  nameEl.textContent = bonus.title ? `xkcd: ${bonus.title}` : 'xkcd';
+  info.appendChild(nameEl);
+
+  const metaEl = document.createElement('p');
+  metaEl.className = 'text-xs text-ink/40 truncate';
+  metaEl.textContent = `Comic #${bonus.num}`;
+  info.appendChild(metaEl);
+
+  header.appendChild(info);
+  card.appendChild(header);
+
+  const link = document.createElement('a');
+  link.href = comicUrl(bonus);
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  const photo = document.createElement('img');
+  photo.src = bonus.img;
+  photo.className = 'block max-w-full mx-auto bg-white px-4 py-4';
+  photo.alt = bonus.title;
+  photo.loading = 'lazy';
+  link.appendChild(photo);
+  card.appendChild(link);
+
+  const meta = document.createElement('div');
+  meta.className = 'px-4 pt-2 pb-3 flex flex-col gap-1.5';
+  if (bonus.alt) {
+    const caption = document.createElement('p');
+    caption.className = 'text-sm text-ink/70 italic leading-relaxed';
+    caption.textContent = bonus.alt;
+    meta.appendChild(caption);
+  }
+  const moreLink = document.createElement('a');
+  moreLink.href = comicUrl(bonus);
+  moreLink.target = '_blank';
+  moreLink.rel = 'noopener noreferrer';
+  moreLink.className = 'text-xs text-gold';
+  moreLink.textContent = 'More on xkcd →';
+  meta.appendChild(moreLink);
+  card.appendChild(meta);
+
+  return card;
 }
 
 function makePostCard(post: FeedPost, unblurred: boolean, auth: AuthState, onOpenPost: (post: FeedPost) => void, onOpenPeer: (account: FeedPost['account']) => void): HTMLElement {

@@ -3,6 +3,7 @@ import type { AuthState } from './auth';
 import { patchAccountId } from './auth';
 import { getLastTriggerTime } from '../timer';
 import { MAX_POSTS_PER_TRIGGER } from '../state';
+import { idbGet, IDB_KEYS } from '../idb';
 
 // --- Mastodon/Pixelfed API types ---
 
@@ -178,6 +179,7 @@ export async function postMeenow(
     // full one that backfills friends' posts; fetchedAt 0 makes it fire at once.
     _homeCache = { statuses: [statusData], newestId: '', fetchedAt: 0 };
   }
+  _myPager = null;
   return statusData.url;
 }
 
@@ -218,7 +220,10 @@ function fetchHomeTimeline(auth: AuthState, force = false): Promise<MastodonStat
     ? `https://${auth.instance}/api/v1/timelines/home?limit=${HOME_TIMELINE_LIMIT}&since_id=${_homeCache.newestId}`
     : `https://${auth.instance}/api/v1/timelines/home?limit=${HOME_TIMELINE_LIMIT}`;
 
-  _homePending = fetch(url, { headers: { Authorization: `Bearer ${auth.accessToken}` } })
+  // no-store: the full-page URL is identical on every launch, so a stale HTTP
+  // cache hit would render an old snapshot missing the newest posts (the user's
+  // own post first among them, which also re-blurs the feed via the count).
+  _homePending = fetch(url, { headers: { Authorization: `Bearer ${auth.accessToken}` }, cache: 'no-store' })
     .then(r => {
       // A failed fetch must reject, not resolve empty: an empty result would be
       // cached and render as a legitimately empty feed / zero post count.
@@ -356,55 +361,141 @@ export async function fetchTodayPostCount(auth: AuthState): Promise<number> {
   const accountId = await resolveAccountId(auth);
   if (!accountId) return 0;
   const periodStart = getLastTriggerTime().getTime();
-  try {
-    const statuses = await fetchHomeTimeline(auth);
-    return statuses.filter(s =>
+  const countOwn = (statuses: MastodonStatus[]): number =>
+    statuses.filter(s =>
       s.account.id === accountId &&
       new Date(s.created_at).getTime() >= periodStart &&
       hasMeenowTag(s)
     ).length;
+  try {
+    let count = countOwn(await fetchHomeTimeline(auth));
+    if (count === 0 && await idbGet<number>(IDB_KEYS.postedTriggerMs) === periodStart) {
+      // This device posted in the current period but the timeline snapshot
+      // lacks the post — the full-page response was stale (e.g. a server-side
+      // timeline cache). One forced since_id refetch recovers it, the same way
+      // pull-to-refresh does; the merge also heals _homeCache for the feed.
+      count = countOwn(await fetchHomeTimeline(auth, true));
+    }
+    return count;
   } catch {
     return 0;
   }
 }
 
-async function fetchArchivedStatuses(auth: AuthState): Promise<MastodonStatus[]> {
+// --- My Photos pager ---
+
+// Incremental pager over the user's own posts: each fetchMyPostsPage call pulls
+// the next page of /accounts/:id/statuses (max_id) and of the Pixelfed archive
+// list (Laravel paginator) in parallel, until both sources are exhausted.
+// Module-level so the grid keeps loaded pages across the detail drill-in/out
+// re-render; resetMyPostsPagerIfStale starts fresh on a new grid open.
+const MY_POSTS_PAGE_LIMIT = 40;
+const MY_POSTS_MAX_PAGES = 50;
+const MY_POSTS_TTL_MS = 60_000;
+
+export interface MyPostsPage { posts: FeedPost[]; hasMore: boolean }
+
+interface MyPostsPager {
+  posts: FeedPost[];
+  seen: Set<string>;
+  statusesMaxId: string;
+  statusesDone: boolean;
+  archiveUrl: string;
+  archivePage: number;
+  archiveDone: boolean;
+  pagesFetched: number;
+  fetchedAt: number;
+}
+let _myPager: MyPostsPager | null = null;
+let _myPagerPending: Promise<MyPostsPage> | null = null;
+
+export function resetMyPostsPagerIfStale(): void {
+  if (_myPager && !_myPagerPending && Date.now() - _myPager.fetchedAt > MY_POSTS_TTL_MS) {
+    _myPager = null;
+  }
+}
+
+async function fetchOwnStatusesPage(auth: AuthState, accountId: string, p: MyPostsPager): Promise<MastodonStatus[]> {
+  const url = new URL(`https://${auth.instance}/api/v1/accounts/${accountId}/statuses`);
+  url.searchParams.set('limit', String(MY_POSTS_PAGE_LIMIT));
+  url.searchParams.set('only_media', 'true');
+  if (p.statusesMaxId) url.searchParams.set('max_id', p.statusesMaxId);
+  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${auth.accessToken}` } });
+  if (!res.ok) throw new Error(`Fetch failed (${res.status})`);
+  const batch = await res.json() as MastodonStatus[];
+  if (!p.statusesMaxId) triggerArchive(auth, batch);
+  if (batch.length > 0) p.statusesMaxId = batch[batch.length - 1].id;
+  if (batch.length < MY_POSTS_PAGE_LIMIT) p.statusesDone = true;
+  return batch;
+}
+
+// Archive failures stay silent (non-Pixelfed instances have no archive endpoint);
+// the source is just marked exhausted with whatever was collected so far.
+async function fetchArchivePage(auth: AuthState, p: MyPostsPager): Promise<MastodonStatus[]> {
+  const base = `https://${auth.instance}/api/v1.1/archive/list`;
+  const url = p.archiveUrl || `${base}?limit=${MY_POSTS_PAGE_LIMIT}`;
   try {
-    const res = await fetch(`https://${auth.instance}/api/v1.1/archive/list`, {
-      headers: { Authorization: `Bearer ${auth.accessToken}` },
-    });
-    if (!res.ok) return [];
-    // Pixelfed returns a paginated envelope { data: [...] }; plain arrays are also handled.
-    const json = await res.json() as MastodonStatus[] | { data: MastodonStatus[] };
-    return Array.isArray(json) ? json : (json.data ?? []);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${auth.accessToken}` } });
+    if (!res.ok) { p.archiveDone = true; return []; }
+    const json = await res.json() as MastodonStatus[] | {
+      data?: MastodonStatus[];
+      next_page_url?: string | null;
+      links?: { next?: string | null };
+    };
+    if (Array.isArray(json)) { p.archiveDone = true; return json; }
+    const data = json.data ?? [];
+    if (data.length === 0) { p.archiveDone = true; return []; }
+    p.archivePage++;
+    const next = json.next_page_url ?? json.links?.next;
+    // Laravel may emit http:// or an internal host behind a proxy; keep only the
+    // query string, rebuilt against the canonical instance origin.
+    p.archiveUrl = next
+      ? `${base}${new URL(next, base).search}`
+      : `${base}?limit=${MY_POSTS_PAGE_LIMIT}&page=${p.archivePage + 1}`;
+    return data;
   } catch {
+    p.archiveDone = true;
     return [];
   }
 }
 
-export async function fetchMyAllPosts(auth: AuthState): Promise<FeedPost[]> {
-  const accountId = await resolveAccountId(auth);
-  if (!accountId) return [];
-  const url = new URL(`https://${auth.instance}/api/v1/accounts/${accountId}/statuses`);
-  url.searchParams.set('limit', String(HOME_TIMELINE_LIMIT));
-  url.searchParams.set('only_media', 'true');
-
-  const [res, archived] = await Promise.all([
-    fetch(url.toString(), { headers: { Authorization: `Bearer ${auth.accessToken}` } }),
-    fetchArchivedStatuses(auth),
-  ]);
-  if (!res.ok) throw new Error(`Fetch failed (${res.status})`);
-  const statuses = await res.json() as MastodonStatus[];
-
-  triggerArchive(auth, statuses);
-
-  const seen = new Set(statuses.map(s => s.id));
-  const merged = [...statuses, ...archived.filter(s => !seen.has(s.id))];
-
-  return merged
-    .filter(s => hasMeenowTag(s) && s.media_attachments.length > 0)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map(toFeedPost);
+export function fetchMyPostsPage(auth: AuthState): Promise<MyPostsPage> {
+  if (_myPagerPending) return _myPagerPending;
+  _myPagerPending = (async () => {
+    const accountId = await resolveAccountId(auth);
+    if (!accountId) return { posts: [], hasMore: false };
+    const p = _myPager ??= {
+      posts: [], seen: new Set<string>(),
+      statusesMaxId: '', statusesDone: false,
+      archiveUrl: '', archivePage: 0, archiveDone: false,
+      pagesFetched: 0, fetchedAt: Date.now(),
+    };
+    // allSettled so a statuses failure doesn't discard an already-fetched archive
+    // batch (its cursor has advanced; dropping the data would skip it forever).
+    const [stRes, arRes] = await Promise.allSettled([
+      p.statusesDone ? Promise.resolve([]) : fetchOwnStatusesPage(auth, accountId, p),
+      p.archiveDone ? Promise.resolve([]) : fetchArchivePage(auth, p),
+    ]);
+    const incoming = [
+      ...(stRes.status === 'fulfilled' ? stRes.value : []),
+      ...(arRes.status === 'fulfilled' ? arRes.value : []),
+    ];
+    const fresh = incoming.filter(s => {
+      if (p.seen.has(s.id)) return false;
+      p.seen.add(s.id);
+      return hasMeenowTag(s) && s.media_attachments.length > 0;
+    });
+    if (fresh.length > 0) {
+      p.posts = [...p.posts, ...fresh.map(toFeedPost)]
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    }
+    p.pagesFetched++;
+    p.fetchedAt = Date.now();
+    if (p.pagesFetched >= MY_POSTS_MAX_PAGES) { p.statusesDone = true; p.archiveDone = true; }
+    if (stRes.status === 'rejected') throw stRes.reason;
+    return { posts: p.posts, hasMore: !p.statusesDone || !p.archiveDone };
+  })().finally(() => { _myPagerPending = null; });
+  return _myPagerPending;
 }
 
 export async function fetchPostContext(auth: AuthState, statusId: string): Promise<PostContext> {
@@ -443,5 +534,8 @@ export async function deletePost(auth: AuthState, statusId: string): Promise<voi
 export function removePostFromCache(postId: string): void {
   if (_homeCache) {
     _homeCache.statuses = _homeCache.statuses.filter(s => s.id !== postId);
+  }
+  if (_myPager) {
+    _myPager.posts = _myPager.posts.filter(post => post.id !== postId);
   }
 }

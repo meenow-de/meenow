@@ -5,7 +5,7 @@ import './style.css';
 import { getAuthState, handleOAuthCallback, dropTokenIfScopesStale } from './api/auth';
 import { getLastTriggerTime, type AppState } from './timer';
 import { MAX_POSTS_PER_TRIGGER, getPendingAdd, setPendingAdd, clearPendingAdd, clearPwaSubbed } from './state';
-import { fetchTodayPostCount, deletePost, removePostFromCache } from './api/pixelfed';
+import { fetchTodayPostCount, deletePost, removePostFromCache, resetMyPostsPagerIfStale } from './api/pixelfed';
 import type { Connection } from './api/social';
 import { renderCapture, stopCaptureStreams } from './screens/capture';
 import { renderFeed } from './screens/feed';
@@ -269,10 +269,12 @@ function mountGrid(): void {
   app.innerHTML = '';
   removeInstallNudge();
   removeNotificationNudge();
+  resetMyPostsPagerIfStale();
 
   history.pushState({ screen: 'grid' }, '');
 
   let popHandler: (() => void) | null = null;
+  let gridScrollY = 0;
 
   const installPop = (): void => {
     popHandler = () => { popHandler = null; activeScreen = null; tick(); };
@@ -280,12 +282,13 @@ function mountGrid(): void {
   };
 
   const openPost = (post: FeedPost): void => {
+    gridScrollY = window.scrollY;
     if (popHandler) { window.removeEventListener('popstate', popHandler); popHandler = null; }
     mountPostDetail(post, () => {
       activeScreen = 'grid';
       app.innerHTML = '';
       installPop();
-      app.appendChild(renderGrid(auth, openPost, onBack));
+      app.appendChild(renderGrid(auth, openPost, onBack, gridScrollY));
     });
   };
 

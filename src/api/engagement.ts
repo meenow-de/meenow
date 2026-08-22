@@ -64,8 +64,11 @@ export async function fetchNewEngagement(auth: StoredAuth, sinceId?: string): Pr
 export async function fetchFriendsPostedCount(auth: StoredAuth): Promise<number> {
   const cutoff = getLastTriggerTime().getTime();
   try {
+    // no-store keeps this SW-side fetch from reading or repopulating the HTTP
+    // cache entry for the same URL the app's feed load uses.
     const res = await fetch(`https://${auth.instance}/api/v1/timelines/home?limit=40`, {
       headers: { Authorization: `Bearer ${auth.accessToken}` },
+      cache: 'no-store',
     });
     if (!res.ok) return 0;
     const statuses = await res.json() as TimelineStatus[];

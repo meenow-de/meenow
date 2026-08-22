@@ -39,7 +39,14 @@ jobs:
           DEFAULT_TZ: Europe/Berlin
         run: node scripts/send-tick.mjs
 
-      - name: Commit expired subscription removals
+      # xkcd sends no CORS headers, so the app reads this mirror from the
+      # push repo instead (src/api/xkcd.ts). Fail-soft: never blocks the tick.
+      - name: Mirror xkcd comic
+        env:
+          OUT_FILE: push-subs/xkcd.json
+        run: node scripts/fetch-xkcd.mjs
+
+      - name: Commit push-repo changes
         working-directory: push-subs
         env:
           SUBS_PATH: ${{ secrets.VITE_PUSH_SUBS_PATH }}
@@ -47,4 +54,23 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add "$SUBS_PATH/"
-          git diff --staged --quiet || (git commit -m "Remove expired subscriptions" && git push)
+          [ ! -f xkcd.json ] || git add xkcd.json
+          # Rebase first: the dev and prod repos run this workflow on the same
+          # schedule against the same push repo, so pushes can race.
+          git diff --staged --quiet || (git commit -m "Update push data" && git pull --rebase && git push)
+
+      # The client-shipped relay token (VITE_PUSH_RELAY_TOKEN) fails silently in
+      # the app when it expires, breaking new-device subscription registration.
+      # Fail the job here so GitHub's workflow-failure email surfaces it. Runs
+      # last so an expired token never blocks the tick send itself.
+      - name: Check relay token validity
+        env:
+          RELAY_TOKEN: ${{ secrets.VITE_PUSH_RELAY_TOKEN }}
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $RELAY_TOKEN" \
+            https://api.github.com/repos/meenow-de/meenow-push/contents/xkcd.json)
+          if [ "$status" != "200" ]; then
+            echo "::error::Relay token check failed (HTTP $status) — VITE_PUSH_RELAY_TOKEN is expired or invalid. Rotate the fine-grained PAT (Contents read/write on meenow-de/meenow-push), update the secret in both repos, and redeploy."
+            exit 1
+          fi

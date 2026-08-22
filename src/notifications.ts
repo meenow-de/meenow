@@ -171,7 +171,10 @@ export async function syncSubscriptionTz(): Promise<void> {
     let sha: string | undefined;
     const getRes = await fetch(url, { headers });
     if (getRes.ok) sha = ((await getRes.json()) as { sha?: string }).sha;
-    else if (getRes.status !== 404) return;
+    else {
+      console.log(`meenow: relay subscription GET failed (${getRes.status}) for ${filename}`);
+      if (getRes.status !== 404) return;
+    }
 
     const res = await fetch(url, {
       method: 'PUT',
