@@ -212,15 +212,42 @@ export async function fetchMyAccount(auth: AuthState): Promise<{ id: string; acc
   return { id: a.id, acct: a.acct, locked: !!a.locked };
 }
 
-export async function setAccountLocked(auth: AuthState, locked: boolean): Promise<boolean> {
-  const form = new FormData();
-  form.append('locked', String(locked));
+// Meenow's privacy posture in one call: `locked` (approve followers manually)
+// plus `is_suggestable` (out of discovery/suggested lists). Both are needed for
+// a closed circle; neither implies the other server-side. Locking also hides
+// your posts and follower list, so discovery is the remaining way for strangers
+// to find you.
+//
+// `is_suggestable` is the real field: the Mastodon-style `discoverable` in API
+// responses is hardcoded true by Pixelfed's AccountTransformer and tells you
+// nothing. Invites are unaffected — a ?add= link resolves by handle and sends a
+// follow request, which works regardless of either flag.
+export async function setAccountPrivacy(auth: AuthState, locked: boolean): Promise<boolean> {
+  // Must be urlencoded, not FormData: PHP only parses multipart bodies on POST,
+  // so a multipart PATCH is silently ignored — Pixelfed answers 200 with the
+  // unchanged profile. URLSearchParams makes fetch send an urlencoded body,
+  // which PATCH does parse. (Verified live against pixelfed.social.)
+  const body = new URLSearchParams({
+    locked: String(locked),
+    is_suggestable: String(!locked),
+  });
   const res = await fetch(`https://${auth.instance}/api/v1/accounts/update_credentials`, {
     method: 'PATCH',
     headers: authHeaders(auth),
-    body: form,
+    body,
   });
-  return res.ok;
+  if (!res.ok) return false;
+  // Pixelfed can answer 200 with an unchanged profile (that silent-ignore is
+  // exactly what the urlencoded body above avoids), so trust the echoed
+  // state rather than the status code alone. `locked` is the only one of the
+  // two fields the response exposes; both travel through the same parser, so
+  // a matching echo means the whole body was read and applied.
+  try {
+    const data = await res.json() as { locked?: boolean };
+    return data.locked === locked;
+  } catch {
+    return false;
+  }
 }
 
 // --- One-tap mutual helpers (single shared path for every entry point) ---

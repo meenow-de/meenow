@@ -6,7 +6,7 @@ import { CHEVRON_LEFT_ICON, SLEEPING_CAT } from '../icons';
 import type { AuthState } from '../api/auth';
 import {
   fetchMyAccount, fetchFollowRequests, fetchConnections, fetchRelationships,
-  setAccountLocked, acceptAndBackFollow, rejectFollowRequest,
+  setAccountPrivacy, acceptAndBackFollow, rejectFollowRequest,
   invalidatePendingRequestCache,
   type Connection, type Relationship,
 } from '../api/social';
@@ -103,7 +103,7 @@ async function loadCircle(
 async function ensureLocked(auth: AuthState, currentlyLocked: boolean): Promise<boolean> {
   if (isLockedApplied(auth.instance)) return currentlyLocked;
   if (!currentlyLocked) {
-    const ok = await setAccountLocked(auth, true);
+    const ok = await setAccountPrivacy(auth, true);
     if (ok) { setLockedApplied(auth.instance); return true; }
     return false;
   }
@@ -287,7 +287,7 @@ function makeLockRow(auth: AuthState, locked: boolean): HTMLElement {
   text.appendChild(label);
   const sub = document.createElement('p');
   sub.className = 'text-xs text-ink/40 mt-0.5';
-  sub.textContent = 'When on, anyone who wants to follow you has to be approved here first.';
+  sub.textContent = 'When on, new followers need your approval and your account stays out of discovery. Invites still work.';
   text.appendChild(sub);
   row.appendChild(text);
 
@@ -302,7 +302,7 @@ function makeLockRow(auth: AuthState, locked: boolean): HTMLElement {
   toggle.addEventListener('click', async () => {
     toggle.disabled = true;
     const next = !on;
-    const ok = await setAccountLocked(auth, next);
+    const ok = await setAccountPrivacy(auth, next);
     if (ok) on = next;
     paint();
     toggle.disabled = false;

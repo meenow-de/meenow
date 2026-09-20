@@ -62,18 +62,25 @@ export function setSyncedTz(tz: string): void {
   localStorage.setItem('meenow:tz', tz);
 }
 
-// Records that the account has been ensured "locked" (manually approve followers)
-// for an instance, so the Circle screen doesn't re-PATCH on every open. Cleared on
-// logout so a fresh login re-applies. Instance-scoped because creds are per-instance.
+// Records that the account has been ensured "locked" (manually approve followers,
+// hidden from discovery) for an instance, so the Circle screen doesn't re-PATCH on
+// every open. Cleared on logout so a fresh login re-applies. Instance-scoped
+// because creds are per-instance.
+// v2: v1 was written against a PATCH that Pixelfed silently ignored (multipart on
+// PATCH), so it recorded a success that never happened. Bumping the key makes every
+// install re-apply once and pick up both the working PATCH and the discovery flag.
+const LOCKED_APPLIED_PREFIX = 'meenow:locked-applied:v2:';
+
 export function isLockedApplied(instance: string): boolean {
-  return localStorage.getItem(`meenow:locked-applied:${instance}`) === 'true';
+  return localStorage.getItem(`${LOCKED_APPLIED_PREFIX}${instance}`) === 'true';
 }
 
 export function setLockedApplied(instance: string): void {
-  localStorage.setItem(`meenow:locked-applied:${instance}`, 'true');
+  localStorage.setItem(`${LOCKED_APPLIED_PREFIX}${instance}`, 'true');
 }
 
 export function clearLockedApplied(instance: string): void {
+  localStorage.removeItem(`${LOCKED_APPLIED_PREFIX}${instance}`);
   localStorage.removeItem(`meenow:locked-applied:${instance}`);
 }
 
